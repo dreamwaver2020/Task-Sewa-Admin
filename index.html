@@ -200,6 +200,8 @@
     tp_submissions:   { col: 'app_submissions',   id: function (e) { return e.subId; },                   sort: function (e) { return num(e.subId); } },
     tp_deposits:      { col: 'app_deposits',      id: function (e) { return e.depositId; },               sort: function (e) { return num(e.depositId); } },
     tp_withdrawals:   { col: 'app_withdrawals',   id: function (e) { return e.withdrawId; },              sort: function (e) { return num(e.withdrawId); } },
+    tp_tickets:       { col: 'app_tickets',       id: function (e) { return e.ticketId; },              sort: function (e) { return num(e.ticketId); } },
+    tp_messages:      { col: 'app_messages',      id: function (e) { return e.msgId; },                 sort: function (e) { return num(e.ts); } },
     tp_notifications: { col: 'app_notifications', id: function (e) { return e.id; },                      sort: function (e) { return num(e.ts); } },
     tp_adminlog:      { col: 'app_adminlog',      id: function (e) { return e.id; },                      sort: function (e) { return num(e.ts); } },
     tp_deleted_users: { col: 'deleted_users',     id: function (e) { return e.firebaseUid || e.uid; },    sort: function (e) { return num(e.deletedAt); } }
@@ -636,6 +638,8 @@
       if (PAGE === 'admin') {
         listen('tp_withdrawals', d.ref('app_withdrawals'), sh);
         listen('tp_notifications', d.ref('app_notifications'), sh);
+        listen('tp_tickets', d.ref('app_tickets'), sh);
+        listen('tp_messages', d.ref('app_messages'), sh);
         listen('tp_adminlog', d.ref('app_adminlog'), sh);
         listen('tp_deleted_users', d.ref('deleted_users'), sh);
         listenLegacyUsers(sh);
@@ -1108,6 +1112,7 @@
                 <a href="javascript:void(0)" onclick="adminGoTo('sec-deposits')" id="sb-sec-deposits" class="sidebar-link"><i class="fa-solid fa-wallet w-5 text-center"></i><span class="flex-1">Add Fund Requests</span><span id="sbadge-deposits" class="hidden bg-fuchsia-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">0</span></a>
                 <a href="javascript:void(0)" onclick="adminOpenEsewa()" id="sb-esewa" class="sidebar-link"><i class="fa-solid fa-receipt w-5 text-center"></i><span class="flex-1">eSewa Received Payments</span></a>
                 <a href="javascript:void(0)" onclick="adminGoTo('sec-withdrawals')" id="sb-sec-withdrawals" class="sidebar-link"><i class="fa-solid fa-money-bill-transfer w-5 text-center"></i><span class="flex-1">Withdrawals</span><span id="sbadge-withdrawals" class="hidden bg-fuchsia-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">0</span></a>
+                <a href="javascript:void(0)" onclick="adminGoTo('sec-tickets')" id="sb-sec-tickets" class="sidebar-link"><i class="fa-solid fa-headset w-5 text-center"></i><span class="flex-1">Support Tickets</span><span id="sbadge-tickets" class="hidden bg-fuchsia-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">0</span></a>
                 <p class="px-3 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Users</p>
                 <a href="javascript:void(0)" onclick="adminGoTo('sec-users')" id="sb-sec-users" class="sidebar-link"><i class="fa-solid fa-users w-5 text-center"></i><span class="flex-1">Manage Users</span></a>
                 <a href="javascript:void(0)" onclick="adminGoTo('sec-history')" id="sb-sec-history" class="sidebar-link"><i class="fa-solid fa-clock-rotate-left w-5 text-center"></i><span class="flex-1">Submissions History</span></a>
@@ -1451,6 +1456,48 @@
                             </table>
                         </div>
                     </div>
+
+                    <!-- Support Tickets / Personal Messages -->
+                    <div id="sec-tickets" class="bg-slate-800 p-6 md:p-8 rounded-3xl shadow-xl border border-slate-700/60 space-y-4">
+                        <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                            <div>
+                                <h3 class="font-bold text-lg text-slate-200 flex items-center gap-2"><i class="fa-solid fa-headset text-indigo-400"></i>Support Tickets &amp; Messages <span id="tka-count" class="hidden text-[10px] font-black bg-fuchsia-500 text-white rounded-full px-2 py-0.5">0</span></h3>
+                                <p class="text-xs text-slate-400">User ko ticket ma reply garnus, ya kunai user lai personal message pathaunus. Sabai live Firebase bata sync huncha.</p>
+                            </div>
+                            <button onclick="tkaOpenNew()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs px-4 py-2.5 rounded-xl transition shadow-lg flex items-center gap-2 w-fit"><i class="fa-solid fa-envelope"></i><span>Message a User</span></button>
+                        </div>
+
+                        <div id="tka-new-box" class="hidden bg-slate-900/60 rounded-2xl border border-slate-700/60 p-5 space-y-3">
+                            <h4 class="font-bold text-sm text-slate-200">User lai personal message</h4>
+                            <input id="tka-new-user" list="tka-users" placeholder="User khojnus (naam / UID / email) ..." class="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                            <datalist id="tka-users"></datalist>
+                            <input id="tka-new-subject" maxlength="120" placeholder="Subject" class="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                            <textarea id="tka-new-text" rows="4" maxlength="1500" placeholder="Message..." class="w-full px-3 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                            <div class="flex gap-2">
+                                <button onclick="tkaCreate()" class="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-extrabold text-xs px-5 py-2.5 rounded-xl transition flex items-center gap-2"><i class="fa-solid fa-paper-plane"></i>Send</button>
+                                <button onclick="tkaCloseNew()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold text-xs px-4 py-2.5 rounded-xl transition">Cancel</button>
+                            </div>
+                        </div>
+
+                        <div class="flex flex-wrap items-center gap-2">
+                            <div id="tka-filters" class="flex gap-1.5 flex-wrap"></div>
+                            <input id="tka-search" oninput="tkaRender(false)" placeholder="Search (naam / UID / subject)..." class="ml-auto w-full sm:w-64 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-xs placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        </div>
+
+                        <div class="grid lg:grid-cols-5 gap-4">
+                            <div id="tka-list-wrap" class="lg:col-span-2 bg-slate-900/40 rounded-2xl border border-slate-700/60 overflow-hidden">
+                                <div id="tka-list" class="max-h-[62vh] overflow-y-auto"></div>
+                            </div>
+                            <div id="tka-thread-wrap" class="hidden lg:flex lg:col-span-3 bg-slate-900/40 rounded-2xl border border-slate-700/60 overflow-hidden flex-col min-h-[340px]">
+                                <div id="tka-thread-head" class="px-4 py-3 border-b border-slate-700/60 flex items-center gap-3 flex-wrap"></div>
+                                <div id="tka-thread" class="flex-1 overflow-y-auto p-4 space-y-3 h-[46vh]"></div>
+                                <div id="tka-reply-box" class="p-3 border-t border-slate-700/60 flex gap-2 items-end">
+                                    <textarea id="tka-reply" rows="2" maxlength="1500" placeholder="Reply lekhnus... (Ctrl+Enter = send)" class="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"></textarea>
+                                    <button onclick="tkaSend()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs px-4 py-3 rounded-xl transition flex items-center gap-2"><i class="fa-solid fa-paper-plane"></i><span class="hidden sm:inline">Reply</span></button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -1695,6 +1742,8 @@
         if (!localStorage.getItem('tp_submissions')) localStorage.setItem('tp_submissions', JSON.stringify([]));
         if (!localStorage.getItem('tp_users')) localStorage.setItem('tp_users', JSON.stringify([]));
         if (!localStorage.getItem('tp_withdrawals')) localStorage.setItem('tp_withdrawals', JSON.stringify([]));
+        if (!localStorage.getItem('tp_tickets')) localStorage.setItem('tp_tickets', JSON.stringify([]));
+        if (!localStorage.getItem('tp_messages')) localStorage.setItem('tp_messages', JSON.stringify([]));
         if (!localStorage.getItem('tp_deposits')) localStorage.setItem('tp_deposits', JSON.stringify([]));
         if (!localStorage.getItem('tp_settings')) {
             localStorage.setItem('tp_settings', JSON.stringify({
@@ -2975,6 +3024,7 @@ function closeTaskAndRefund(taskId, by) {
             set('subs', g('tp_submissions').filter(s => s.status === 'Pending').length);
             set('deposits', g('tp_deposits').filter(d => d.status === 'Pending').length);
             set('withdrawals', g('tp_withdrawals').filter(w => w.status === 'Pending').length);
+            try { if (typeof tkaBadges === 'function') tkaBadges(); } catch (e) {}
             set('dashtasks', g('tp_tasks').filter(t => (t.status || 'Approved') === 'Approved').length);
         }
     </script>
@@ -3002,7 +3052,7 @@ function tpDeviceId() {
 }
 
 // ---------- INSTANT SYNC (user page <-> admin page) ----------
-const TP_WATCH = ['tp_tasks', 'tp_submissions', 'tp_users', 'tp_withdrawals', 'tp_deposits', 'tp_settings', 'tp_notifications', 'tp_adminlog'];
+const TP_WATCH = ['tp_tickets', 'tp_messages', 'tp_tasks', 'tp_submissions', 'tp_users', 'tp_withdrawals', 'tp_deposits', 'tp_settings', 'tp_notifications', 'tp_adminlog'];
 const _tpHandlers = [];
 let _tpTimer = null, _tpSig = null, _tpOwnWrite = false, _tpChannel = null;
 function tpOnDataChange(fn) { _tpHandlers.push(fn); }
@@ -3725,5 +3775,194 @@ tpOnDataChange(function () { try { siteInfoLoad(false); } catch (e) {} });
 setTimeout(function () { siteInfoLoad(true); }, 800);
 </script>
 
+<!-- ===== SUPPORT TICKETS: admin side (Firebase live sync via tp_tickets / tp_messages) ===== -->
+<script>
+(function () {
+    'use strict';
+    var CUR = null, FILTER = 'all', sigThread = '', prevUser = null, grace = Date.now() + 8000, lastSend = 0;
+    function $(id) { return document.getElementById(id); }
+    function allT() { return tpGet('tp_tickets', []).filter(function (t) { return t && t.ticketId != null; }); }
+    function getT(id) { return allT().filter(function (t) { return String(t.ticketId) === String(id); })[0] || null; }
+    function msgs(id) { return tpGet('tp_messages', []).filter(function (m) { return m && String(m.ticketId) === String(id); }).sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); }); }
+    function unread(t) { return (t.userMsgs || 0) > (t.adminSeenUserMsgs || 0); }
+    function fmt(ts) { try { return new Date(ts).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
+    function sid(t) { return '#' + String(t.ticketId).slice(-5); }
+    function nl(s) { return esc(s).replace(/\n/g, '<br>'); }
+    function stBadge(st) {
+        var c = st === 'Closed' ? 'bg-slate-500/15 text-slate-400 border-slate-500/30' : st === 'Answered' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/20';
+        return '<span class="text-[10px] px-2 py-0.5 rounded-full font-bold border ' + c + '">' + esc(st || 'Open') + '</span>';
+    }
+    function saveTicket(id, patch) {
+        var all = tpGet('tp_tickets', []), t = all.filter(function (x) { return String(x.ticketId) === String(id); })[0];
+        if (!t) return null; Object.assign(t, patch); tpSet('tp_tickets', all); return t;
+    }
+    function sorted() {
+        return allT().sort(function (x, y) { var ux = unread(x) ? 1 : 0, uy = unread(y) ? 1 : 0; return uy - ux || (y.updatedAt || 0) - (x.updatedAt || 0); });
+    }
+    function counts() {
+        var c = { all: 0, open: 0, answered: 0, closed: 0, unread: 0 };
+        allT().forEach(function (t) { c.all++; if (t.status === 'Closed') c.closed++; else if (t.status === 'Answered') c.answered++; else c.open++; if (unread(t)) c.unread++; });
+        return c;
+    }
+    function badges() {
+        var n = counts().unread;
+        var el = $('sbadge-tickets'); if (el) { el.textContent = n; el.classList.toggle('hidden', !n); }
+        var el2 = $('tka-count'); if (el2) { el2.textContent = n + ' new'; el2.classList.toggle('hidden', !n); }
+    }
+    window.tkaBadges = badges;
+
+    function renderFilters() {
+        var box = $('tka-filters'); if (!box) return; var c = counts();
+        var defs = [['all', 'All', c.all], ['unread', 'Unread', c.unread], ['open', 'Waiting reply', c.open], ['answered', 'Answered', c.answered], ['closed', 'Closed', c.closed]];
+        box.innerHTML = defs.map(function (d) {
+            var on = FILTER === d[0];
+            return '<button onclick="tkaFilter(\'' + d[0] + '\')" class="text-[11px] font-bold px-3 py-1.5 rounded-lg border transition ' + (on ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-700') + '">' + d[1] + ' <span class="opacity-70">' + d[2] + '</span></button>';
+        }).join('');
+    }
+    function visibleList() {
+        var q = (($('tka-search') || {}).value || '').trim().toLowerCase();
+        return sorted().filter(function (t) {
+            if (FILTER === 'unread' && !unread(t)) return false;
+            if (FILTER === 'open' && (t.status === 'Closed' || t.status === 'Answered')) return false;
+            if (FILTER === 'answered' && t.status !== 'Answered') return false;
+            if (FILTER === 'closed' && t.status !== 'Closed') return false;
+            if (q && (String(t.userName || '') + ' ' + String(t.uid || '') + ' ' + String(t.subject || '') + ' ' + String(t.userEmail || '')).toLowerCase().indexOf(q) < 0) return false;
+            return true;
+        });
+    }
+    function renderList() {
+        var box = $('tka-list'); if (!box) return;
+        var list = visibleList();
+        if (!list.length) { box.innerHTML = '<div class="p-8 text-center text-slate-500 text-xs">Kunai ticket chaina.</div>'; return; }
+        box.innerHTML = list.map(function (t) {
+            var u = unread(t), act = String(CUR) === String(t.ticketId);
+            return '<button onclick="tkaOpen(' + t.ticketId + ')" class="w-full text-left px-4 py-3 border-b border-slate-700/50 hover:bg-slate-700/20 transition ' + (act ? 'bg-slate-700/50' : '') + '">' +
+                '<div class="flex items-center gap-2"><span class="font-bold text-sm text-slate-100 truncate flex-1">' + (u ? '<span class="inline-block w-2 h-2 rounded-full bg-rose-500 mr-1.5"></span>' : '') + esc(t.subject) + '</span>' + stBadge(t.status) + '</div>' +
+                '<div class="text-xs text-indigo-300 truncate mt-0.5">' + esc(t.userName || '') + ' <span class="text-slate-500">(' + esc(t.uid) + ')</span></div>' +
+                '<div class="text-xs text-slate-400 truncate mt-0.5">' + (t.lastFrom === 'admin' ? '<b>You:</b> ' : '<b>User:</b> ') + esc(t.lastMsg || '') + '</div>' +
+                '<div class="text-[10px] text-slate-500 mt-1">' + sid(t) + ' • ' + esc(t.category || (t.startedBy === 'admin' ? 'Admin message' : '')) + ' • ' + fmt(t.updatedAt) + '</div></button>';
+        }).join('');
+    }
+    function layout() {
+        var lw = $('tka-list-wrap'), tw = $('tka-thread-wrap'); if (!lw || !tw) return;
+        var open = !!CUR;
+        lw.classList.toggle('hidden', open && window.innerWidth < 1024);
+        tw.classList.toggle('hidden', !open && window.innerWidth < 1024);
+        tw.classList.toggle('flex', open);
+    }
+    function renderThread(force) {
+        if (!$('tka-thread-wrap')) return;
+        var t = CUR ? getT(CUR) : null;
+        if (!t) {
+            $('tka-thread-head').innerHTML = '';
+            $('tka-thread').innerHTML = '<div class="h-full flex items-center justify-center text-slate-500 text-sm text-center px-6"><div><i class="fa-regular fa-message text-3xl mb-2 block"></i>Ticket chhannus</div></div>';
+            $('tka-reply-box').classList.add('hidden'); sigThread = ''; return;
+        }
+        var ms = msgs(t.ticketId);
+        var sig = t.ticketId + '|' + ms.map(function (m) { return m.msgId; }).join(',') + '|' + t.status + '|' + (t.userSeenAdminMsgs || 0);
+        if (!force && sig === sigThread) return;
+        var grew = sigThread.split('|')[0] !== String(t.ticketId) || sig.split('|')[1] !== sigThread.split('|')[1];
+        sigThread = sig;
+        $('tka-thread-head').innerHTML =
+            '<button onclick="tkaBack()" class="lg:hidden text-slate-300 hover:text-white w-8 h-8 rounded-full bg-slate-700/60"><i class="fa-solid fa-arrow-left"></i></button>' +
+            '<div class="flex-1 min-w-0"><div class="font-bold text-sm text-slate-100 truncate">' + esc(t.subject) + '</div><div class="text-[10px] text-slate-400">' + esc(t.userName || '') + ' (' + esc(t.uid) + ')' + (t.userEmail ? ' • ' + esc(t.userEmail) : '') + ' • ' + sid(t) + '</div></div>' + stBadge(t.status) +
+            (t.status === 'Closed'
+                ? '<button onclick="tkaSetStatus(\'Open\')" class="text-[11px] font-bold px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200">Reopen</button>'
+                : '<button onclick="tkaSetStatus(\'Closed\')" class="text-[11px] font-bold px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white">Close ticket</button>');
+        var lastAdminIdx = -1; ms.forEach(function (m, i) { if (m.from === 'admin') lastAdminIdx = i; });
+        $('tka-thread').innerHTML = ms.map(function (m, i) {
+            var adm = m.from === 'admin';
+            return '<div class="flex ' + (adm ? 'justify-end' : 'justify-start') + '"><div class="max-w-[82%]">' +
+                '<div class="text-[10px] mb-0.5 ' + (adm ? 'text-right' : '') + ' text-slate-500">' + (adm ? 'Admin' : esc(m.name || t.userName || 'User')) + ' • ' + fmt(m.ts) + '</div>' +
+                '<div class="px-3.5 py-2 rounded-2xl text-sm leading-relaxed break-words ' + (adm ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-slate-700 text-slate-100 rounded-bl-sm') + '">' + nl(m.text) + '</div>' +
+                (adm && i === lastAdminIdx && (t.userSeenAdminMsgs || 0) >= (t.adminMsgs || 0) && (t.adminMsgs || 0) > 0 ? '<div class="text-[10px] text-emerald-400 text-right mt-0.5"><i class="fa-solid fa-check-double"></i> User le dekhyo</div>' : '') +
+                '</div></div>';
+        }).join('');
+        $('tka-reply-box').classList.remove('hidden');
+        if (grew || force) { var th = $('tka-thread'); th.scrollTop = th.scrollHeight; }
+    }
+    function render(force) { renderFilters(); renderList(); renderThread(force); layout(); badges(); }
+    function markSeen() {
+        if (!CUR) return; var t = getT(CUR); if (!t) return;
+        if ((t.userMsgs || 0) > (t.adminSeenUserMsgs || 0)) saveTicket(t.ticketId, { adminSeenUserMsgs: t.userMsgs || 0 });
+    }
+    function sectionVisible() { var el = $('sec-tickets'); return !!el && el.offsetParent !== null && !document.hidden; }
+
+    window.tkaRender = render;
+    window.tkaFilter = function (f) { FILTER = f; render(false); };
+    window.tkaOpen = function (id) { CUR = id; sigThread = ''; markSeen(); render(true); };
+    window.tkaBack = function () { CUR = null; sigThread = ''; render(true); };
+
+    window.tkaSend = function () {
+        var t = CUR ? getT(CUR) : null, inp = $('tka-reply'); if (!t || !inp) return;
+        var text = inp.value.trim(); if (!text) return;
+        if (text.length > 1500) { alert('Message dherai lamo bhayo (max 1500 akshar).'); return; }
+        var now = Date.now(); if (now - lastSend < 800) return; lastSend = now;
+        var ms = tpGet('tp_messages', []);
+        ms.push({ msgId: 'm' + now + '_' + Math.random().toString(36).slice(2, 6), ticketId: t.ticketId, uid: t.uid, from: 'admin', name: 'Admin', text: text, ts: now });
+        tpSet('tp_messages', ms);
+        saveTicket(t.ticketId, { adminMsgs: (t.adminMsgs || 0) + 1, status: 'Answered', updatedAt: now, lastMsg: text.slice(0, 80), lastFrom: 'admin', adminSeenUserMsgs: t.userMsgs || 0 });
+        try { tpNotify(t.uid, 'Support: Admin le tapai ko ticket "' + t.subject + '" ma reply garyo.', 'info'); } catch (e) {}
+        try { tpAdminLog('Ticket reply', (t.userName || '') + ' (' + t.uid + ')', sid(t) + ' • ' + t.subject); } catch (e) {}
+        inp.value = ''; render(true);
+    };
+    window.tkaSetStatus = function (st) {
+        if (!CUR) return; var t = getT(CUR); if (!t) return;
+        if (st === 'Closed' && !confirm('Yo ticket close garne?')) return;
+        saveTicket(t.ticketId, { status: st === 'Open' ? ((t.adminMsgs || 0) > 0 && t.lastFrom === 'admin' ? 'Answered' : 'Open') : st, updatedAt: Date.now() });
+        try { tpNotify(t.uid, 'Support: tapai ko ticket "' + t.subject + '" ' + (st === 'Closed' ? 'close gariyo.' : 'feri khuliyo.'), 'info'); } catch (e) {}
+        render(true);
+    };
+
+    function userLabel(u) { return (u.name || 'User') + ' \u2014 ' + u.uid + (u.email ? ' (' + u.email + ')' : ''); }
+    window.tkaOpenNew = function () {
+        var dl = $('tka-users');
+        if (dl) dl.innerHTML = tpGet('tp_users', []).filter(function (u) { return u && u.uid && !u.isAdmin; }).map(function (u) { return '<option value="' + esc(userLabel(u)) + '"></option>'; }).join('');
+        $('tka-new-box').classList.remove('hidden'); $('tka-new-user').focus();
+    };
+    window.tkaCloseNew = function () { $('tka-new-box').classList.add('hidden'); };
+    window.tkaCreate = function () {
+        var raw = $('tka-new-user').value.trim(), subj = $('tka-new-subject').value.trim(), text = $('tka-new-text').value.trim();
+        var users = tpGet('tp_users', []), u = null, m = raw.match(/UID-\d+/i);
+        if (m) u = users.filter(function (x) { return String(x.uid).toUpperCase() === m[0].toUpperCase(); })[0];
+        if (!u && raw) { var q = raw.toLowerCase(); var hit = users.filter(function (x) { return x && ((x.email || '').toLowerCase() === q || (x.name || '').toLowerCase() === q); }); if (hit.length === 1) u = hit[0]; }
+        if (!u) { alert('User bhetiena. List bata user chhannus (UID sahit).'); return; }
+        if (!subj) { alert('Subject lekhnus.'); return; }
+        if (!text) { alert('Message lekhnus.'); return; }
+        if (text.length > 1500) { alert('Message dherai lamo bhayo (max 1500 akshar).'); return; }
+        var now = Date.now(), id = now * 1000 + Math.floor(Math.random() * 1000);
+        var ms = tpGet('tp_messages', []);
+        ms.push({ msgId: 'm' + now + '_' + Math.random().toString(36).slice(2, 6), ticketId: id, uid: u.uid, from: 'admin', name: 'Admin', text: text, ts: now });
+        tpSet('tp_messages', ms);
+        var ts = tpGet('tp_tickets', []);
+        ts.push({ ticketId: id, uid: u.uid, userName: u.name || 'User', userEmail: u.email || '', category: 'Message from Admin', subject: subj, status: 'Answered', startedBy: 'admin',
+            createdAt: now, updatedAt: now, lastMsg: text.slice(0, 80), lastFrom: 'admin', userMsgs: 0, adminMsgs: 1, userSeenAdminMsgs: 0, adminSeenUserMsgs: 0 });
+        tpSet('tp_tickets', ts);
+        try { tpNotify(u.uid, 'Admin ko message: "' + subj + '" \u2014 Support Tickets ma herenus.', 'info'); } catch (e) {}
+        try { tpAdminLog('Message to user', (u.name || '') + ' (' + u.uid + ')', subj); } catch (e) {}
+        $('tka-new-user').value = ''; $('tka-new-subject').value = ''; $('tka-new-text').value = ''; tkaCloseNew();
+        showToast('Message pathayo: ' + (u.name || u.uid));
+        FILTER = 'all'; tkaOpen(id);
+    };
+
+    document.addEventListener('keydown', function (e) {
+        if (e.target && e.target.id === 'tka-reply' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); tkaSend(); }
+    });
+    window.addEventListener('resize', function () { try { layout(); } catch (e) {} });
+
+    function onData() {
+        if (!$('sec-tickets')) return;
+        var sum = 0, who = ''; allT().forEach(function (t) { sum += (t.userMsgs || 0); if (unread(t)) who = t.userName || t.uid; });
+        if (prevUser !== null && Date.now() > grace && sum > prevUser) showToast('Naya support message: ' + (who || 'user') + ' \uD83D\uDCAC');
+        prevUser = sum;
+        if (CUR && sectionVisible()) markSeen();
+        badges();
+        if (sectionVisible()) render(false);
+    }
+    tpOnDataChange(function () { try { onData(); } catch (e) { console.error('tickets', e); } });
+    setInterval(function () { try { badges(); } catch (e) {} }, 3000);
+    setTimeout(function () { try { render(true); } catch (e) {} }, 1500);
+})();
+</script>
 </body>
 </html>

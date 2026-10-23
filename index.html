@@ -539,11 +539,41 @@
   function listenPresence(sh) {
     var r = SH[sh].db.ref('presence'), t = 0;
     if (!S.online) S.online = new Map();
-    function bump() { if (t) return; t = setTimeout(function () { t = 0; try { if (typeof window.tpOnlineChanged === 'function') window.tpOnlineChanged(); } catch (e) {} }, 300); }
+    function bump() { if (t) return; t = setTimeout(function () { t = 0; try { if (typeof window.tpOnlineChanged === 'function') window.tpOnlineChanged(); } catch (e) {} }, 0); }
     function put(s) { var v = s.val(); if (!v || typeof v !== 'object') return; S.online.set(s.key, { fid: s.key, name: v.name || '', uid: v.uid || '', ts: v.ts || 0, shard: sh }); S.presErr = ''; bump(); }
     function fail(err) { S.presErr = isDenied(err) ? 'Online users padhna rules le rokyo (permission denied). Naya firebase rules publish garnus.' : String((err && (err.code || err.message)) || err); bump(); }
     var a = r.on('child_added', put, fail), c = r.on('child_changed', put, fail), d = r.on('child_removed', function (s) { S.online.delete(s.key); bump(); }, fail);
     S.unsubs.push(function () { try { r.off('child_added', a); r.off('child_changed', c); r.off('child_removed', d); } catch (e) {} });
+  }
+  // ---------- USER PAGE: online presence lekhne (admin le yehi padhcha) ----------
+  // presence/{firebaseUid} = { name, uid, ts }.  Tab band / internet jada server le afai hatauncha (onDisconnect).
+  function startPresenceWriter() {
+    var fuid = S.fuid; if (!fuid) return;
+    var pdb = SH[ACT].db, ref = pdb.ref('presence/' + idStr(fuid)), conn = pdb.ref('.info/connected'), hb = 0;
+    function who() { var m = null; try { m = myProfile(); } catch (e) {} if (!m) { try { m = JSON.parse(RAW_GET.call(localStorage, 'tp_activeUser') || 'null'); } catch (e) {} } return m || {}; }
+    function mark() {
+      if (S.fuid !== fuid) return;
+      var m = who();
+      try {
+        ref.onDisconnect().remove().then(function () {
+          return ref.set({ name: m.name || '', uid: m.uid || '', ts: SV.TIMESTAMP });
+        }).catch(function (e) { console.warn('presence write', (e && e.code) || e); });
+      } catch (e) {}
+    }
+    function offline() { try { ref.remove(); } catch (e) {} }
+    var ch = conn.on('value', function (s) { if (s.val() === true && !document.hidden) mark(); });
+    var onVis = function () { if (document.hidden) offline(); else mark(); };
+    var onHide = function () { offline(); };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', onHide);
+    window.addEventListener('beforeunload', onHide);
+    hb = setInterval(function () { if (!document.hidden && S.fuid === fuid) { try { ref.child('ts').set(SV.TIMESTAMP); } catch (e) {} } }, 30000);
+    S.unsubs.push(function () {
+      try { conn.off('value', ch); } catch (e) {}
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', onHide); window.removeEventListener('beforeunload', onHide);
+      clearInterval(hb); try { ref.remove(); } catch (e) {}
+    });
   }
   function listenLegacyUsers(sh) {
     sh = sh || ACT;
@@ -659,6 +689,7 @@
         listenPresence(sh);
       }
     });
+    if (PAGE !== 'admin') startPresenceWriter();
     if (PAGE !== 'admin') {
       var tr = db.ref('deleted_users/' + idStr(S.fuid));
       var th = tr.on('value', function (d) { if (d.exists()) onAccountRemoved(); }, function () {});
@@ -2707,7 +2738,7 @@ function closeTaskAndRefund(taskId, by) {
 
                 tbody.innerHTML += `
                     <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition admin-user-row" data-search="${(u.name + ' ' + u.email + ' ' + u.uid).toLowerCase()}">
-                        <td class="p-4"><b class="text-white">${u.name}</b><br><span class="text-xs font-mono text-slate-400">${u.uid}</span></td>
+                        <td class="p-4"><b class="text-white">${u.name}</b> <span class="tp-ol-dot" data-fuid="${u.firebaseUid || ''}" data-uid="${u.uid || ''}"></span><br><span class="text-xs font-mono text-slate-400">${u.uid}</span></td>
                         <td class="p-4 text-slate-300 text-xs">${u.email}</td>
                         <td class="p-4">
                             <div class="flex items-center space-x-2">
@@ -2723,6 +2754,7 @@ function closeTaskAndRefund(taskId, by) {
                     </tr>
                 `;
             });
+            try { paintOnlineDots(); } catch (e) {}
         }
 
         function filterAdminUsers() {
@@ -3173,7 +3205,7 @@ function closeTaskAndRefund(taskId, by) {
             const sum = k => round2(rows.filter(r => r.kind === k).reduce((n, r) => n + r.cr + r.dr, 0));
             const dep = sum('dep'), wd = sum('wd') - sum('ref'), gross = sum('task'), tax = sum('tax');
             const tc = round2(rows.filter(r => !r.info).reduce((n, r) => n + r.cr, 0)), td = round2(rows.filter(r => !r.info).reduce((n, r) => n + r.dr, 0));
-            window._stmt = { u, rows, tc, td };
+            rows.reverse(); window._stmt = { u, rows, tc, td };   // latest transaction pahila
             const card = (l, v, c) => `<div class="bg-slate-900 p-3 rounded-xl border border-slate-700/60"><p class="text-[10px] font-bold text-slate-400 uppercase">${l}</p><p class="text-base font-extrabold ${c || 'text-slate-100'} mt-0.5">Rs. ${stmtMoney(v)}</p></div>`;
             const body = rows.map(r => r.info
                 ? `<tr class="border-b border-slate-700/50 opacity-60 italic"><td class="p-3 text-xs whitespace-nowrap">${esc(stmtDate(r.ts))}</td><td class="p-3 text-xs">${esc(r.desc)}</td><td class="p-3 text-xs">${esc(r.ref)}</td><td class="p-3 text-right">-</td><td class="p-3 text-right">-</td><td class="p-3 text-right text-xs">${esc(r.info)}</td></tr>`
@@ -3205,9 +3237,21 @@ function closeTaskAndRefund(taskId, by) {
             w.document.write('<html><head><title>Statement ' + esc(st.u.uid) + '</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#111}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #ccc;padding:6px;text-align:left}th:nth-child(n+4),td:nth-child(n+4){text-align:right}</style></head><body><h2>Account Statement</h2><p><b>' + esc(st.u.name || '') + '</b><br>' + esc(st.u.uid) + ' &middot; ' + esc(st.u.email || '') + '<br>Current balance: Rs. ' + stmtMoney(st.u.balance) + '<br>Generated: ' + esc(new Date().toLocaleString()) + '</p>' + t.outerHTML + '</body></html>');
             w.document.close(); w.focus(); setTimeout(function () { w.print(); }, 300);
         }
-        setInterval(function () { const sc = document.getElementById('statement-section'); if (sc && !sc.classList.contains('hidden')) renderStatement(); }, 4000);
-        window.tpOnlineChanged = renderOnline;
-        setInterval(function () { const sc = document.getElementById('online-section'); if (sc && !sc.classList.contains('hidden')) renderOnline(); }, 4000);
+        (function regSync() {   // tpOnDataChange pachhi ko script ma define hunchha => tyo tayar nabhaye samma pakhne
+            if (typeof tpOnDataChange !== 'function') { setTimeout(regSync, 30); return; }
+            tpOnDataChange(function () { const sc = document.getElementById('statement-section'); if (sc && !sc.classList.contains('hidden')) renderStatement(); renderOnline(); paintOnlineDots(); });
+        })();
+        // Online change aaune bittikai: sidebar count + Online tab + users table dot -- tuntai (no timer)
+        function paintOnlineDots() {
+            const on = (window.TPSync && TPSync.onlineList) ? TPSync.onlineList() : [];
+            const f = new Set(on.map(o => o.fid)), uu = new Set(on.map(o => o.uid).filter(Boolean));
+            document.querySelectorAll('.tp-ol-dot').forEach(el => {
+                const isOn = (el.dataset.fuid && f.has(el.dataset.fuid)) || (el.dataset.uid && uu.has(el.dataset.uid));
+                el.innerHTML = isOn ? '<span class="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400"><span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>Online</span>' : '<span class="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500"><span class="w-2 h-2 rounded-full bg-slate-600"></span>Offline</span>';
+            });
+        }
+        window.tpOnlineChanged = function () { renderOnline(); paintOnlineDots(); };
+        setTimeout(function () { renderOnline(); paintOnlineDots(); }, 0);
         function adminGoTo(id) {
             closeAdminSidebar();
             if (document.getElementById('admin-section').classList.contains('hidden')) showAdminTab('control');
@@ -3292,7 +3336,7 @@ function tpSigNow() {
             if (_tpOwnWrite) { _tpOwnWrite = false; return; }   // our own write — page already re-rendered itself
             tpFire();
         } else { _tpOwnWrite = false; }
-    }, 1500);
+    }, 400);
 })();
 
 // ---------- NOTIFICATIONS (stored per user, shown on the user page) ----------

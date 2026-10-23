@@ -36,7 +36,7 @@
     var n = 0;
     for (var i = 0; i < SHARD_IDS.length; i++) {
       var u = SH[SHARD_IDS[i]].auth.currentUser;
-      if (u && !u.emailVerified) { try { await u.sendEmailVerification(); n++; } catch (e) { console.warn('verify mail', (e && e.code) || e); } }
+      if (u && !adminOk(SHARD_IDS[i])) { try { await u.sendEmailVerification(); n++; } catch (e) { console.warn('verify mail', (e && e.code) || e); } }
     }
     return n;
   }
@@ -47,7 +47,7 @@
     }
   }
   function allVerified() {
-    return SHARD_IDS.every(function (id) { var u = SH[id].auth.currentUser; return !u || u.emailVerified; });
+    return SHARD_IDS.every(function (id) { var u = SH[id].auth.currentUser; return !u || adminOk(id); });
   }
   async function isAdminEmail(email) {
     try { return (await sha256Hex('tp-admin|' + String(email || '').trim().toLowerCase())) === ADMIN_EMAIL_HASH; }
@@ -63,23 +63,18 @@
       messagingSenderId: "985229257627",
       appId: "1:985229257627:web:be54673466ece45c03cf3e",
       measurementId: "G-PZ9SF3KY1C"
-    } },
-    { id: 'B', weight: 1, config: {
-      apiKey: "AIzaSyATNPcSS1Rj_I9YqbkDIY3wCfQ44EHnMoc",
-      authDomain: "mero-task-sewa-b.firebaseapp.com",
-      databaseURL: "https://mero-task-sewa-b-default-rtdb.firebaseio.com",   // <-- Firebase Console > Realtime Database bata URL milaunus
-      projectId: "mero-task-sewa-b",
-      storageBucket: "mero-task-sewa-b.firebasestorage.app",
-      messagingSenderId: "463752765672",
-      appId: "1:463752765672:web:49db63ebc3a4ca5096a95d",
-      measurementId: "G-S5GWWJ64FW"
     } }
   ];
-  // weight = naya signup ko hissa. A:0, B:1 garyo bhane naya signup sabai B ma jancha. Purano user afno shard ma nai rahanchha.
+  // Sirf Shard A (ek matra Firebase project) use hunchha.
 
-  var RAW_SET = Storage.prototype.setItem;        // native (this script loads first)
-  var RAW_GET = Storage.prototype.getItem;
-  var RAW_REMOVE = Storage.prototype.removeItem;
+  // 10k+ user ko data localStorage (5MB limit) ma samaudaina => thulo list haru memory ma rakhincha (Firebase bata load huncha).
+  var N_SET = Storage.prototype.setItem, N_GET = Storage.prototype.getItem, N_REMOVE = Storage.prototype.removeItem;
+  var MEM = {}, BIGK = { tp_users: 1, tp_tasks: 1, tp_submissions: 1, tp_deposits: 1, tp_withdrawals: 1, tp_tickets: 1, tp_messages: 1, tp_notifications: 1, tp_adminlog: 1, tp_deleted_users: 1 };
+  function isBig(self, k) { return self === window.localStorage && BIGK[k] === 1; }
+  var RAW_SET = function (k, v) { if (isBig(this, k)) { MEM[k] = String(v); return; } return N_SET.call(this, k, v); };
+  var RAW_GET = function (k) { if (isBig(this, k)) return (k in MEM) ? MEM[k] : null; return N_GET.call(this, k); };
+  var RAW_REMOVE = function (k) { if (isBig(this, k)) { delete MEM[k]; return; } return N_REMOVE.call(this, k); };
+  try { Object.keys(BIGK).forEach(function (k) { N_REMOVE.call(window.localStorage, k); }); } catch (e) {}   // purano thulo copy hataune
 
   if (!window.firebase) { console.error('Firebase SDK load bhayena'); return; }
   var SHARD_IDS = SHARDS_CFG.map(function (s) { return s.id; });
@@ -90,6 +85,13 @@
     SH[s.id] = { id: s.id, app: ap, auth: ap.auth(), db: ap.database() };
   });
   var ACT = SHARD_IDS[0];
+  // Admin ke lagi shard "ok" ho ki hoina: A ma email verified huna parcha; 
+  // auto-banekoe account hunchha, alag email verify garnu pardaina (B ko rules le admin email lai verify bina pani maan chhan).
+  function adminOk(id) {
+    var u = SH[id].auth.currentUser; if (!u) return false;
+    var cfg = SHARDS_CFG.filter(function (c) { return c.id === id; })[0] || {};
+    return u.emailVerified === true || cfg.adminSkipVerify === true;
+  }
   if (PAGE !== 'admin') { var sv0 = RAW_GET.call(localStorage, 'tp_shard'); if (sv0 && SH[sv0]) ACT = sv0; }
   function setActive(id) { if (!SH[id]) return; ACT = id; if (PAGE !== 'admin') { try { RAW_SET.call(localStorage, 'tp_shard', id); } catch (e) {} } }
   function pickShard() {
@@ -171,7 +173,7 @@
   }
   var auth = mk('auth'), db = mk('db');
   var SV = firebase.database.ServerValue;
-  function liveShards() { return PAGE === 'admin' ? SHARD_IDS.filter(function (id) { return SH[id].auth.currentUser; }) : [ACT]; }
+  function liveShards() { return PAGE === 'admin' ? SHARD_IDS.filter(adminOk) : [ACT]; }
   function route(lsKey, id, e) {
     if (PAGE !== 'admin') return [ACT];
     if (lsKey === 'tp_tasks') return liveShards();
@@ -366,7 +368,7 @@
       var changed = applyRemote(lsKey);
       if (lsKey === 'tp_users') checkMine();
       if (changed) fire();
-    }, 0);
+    }, (S.remote[lsKey] && S.remote[lsKey].size > 1000) ? 250 : 0);
   }
 
   function hasTomb(u) {
@@ -470,6 +472,8 @@
   }
 
   // patch localStorage writes (loads before the page's own sync patch)
+  Storage.prototype.getItem = function (k) { return RAW_GET.call(this, k); };
+  Storage.prototype.removeItem = function (k) { return RAW_REMOVE.call(this, k); };
   Storage.prototype.setItem = function (k, v) {
     RAW_SET.call(this, k, v);
     if (this === window.localStorage && S.tracked[k]) { try { onLocalWrite(k, v); } catch (e) { console.error('sync push', e); } }
@@ -530,6 +534,16 @@
       } else if (changed) fire();
     }, function (err) { console.error('settings listen', err); if (first) { first = false; srcDone(); } });
     S.unsubs.push(function () { try { r.off('value', h); } catch (e) {} });
+  }
+  // ---------- ONLINE USERS (presence/{firebaseUid} — user page le online huda lekhcha, band huda afai hatincha) ----------
+  function listenPresence(sh) {
+    var r = SH[sh].db.ref('presence'), t = 0;
+    if (!S.online) S.online = new Map();
+    function bump() { if (t) return; t = setTimeout(function () { t = 0; try { if (typeof window.tpOnlineChanged === 'function') window.tpOnlineChanged(); } catch (e) {} }, 300); }
+    function put(s) { var v = s.val(); if (!v || typeof v !== 'object') return; S.online.set(s.key, { fid: s.key, name: v.name || '', uid: v.uid || '', ts: v.ts || 0, shard: sh }); S.presErr = ''; bump(); }
+    function fail(err) { S.presErr = isDenied(err) ? 'Online users padhna rules le rokyo (permission denied). Naya firebase rules publish garnus.' : String((err && (err.code || err.message)) || err); bump(); }
+    var a = r.on('child_added', put, fail), c = r.on('child_changed', put, fail), d = r.on('child_removed', function (s) { S.online.delete(s.key); bump(); }, fail);
+    S.unsubs.push(function () { try { r.off('child_added', a); r.off('child_changed', c); r.off('child_removed', d); } catch (e) {} });
   }
   function listenLegacyUsers(sh) {
     sh = sh || ACT;
@@ -605,7 +619,7 @@
     S.unsubs.splice(0).forEach(function (u) { try { u(); } catch (e) {} });
     Object.keys(S.sched).forEach(function (k) { clearTimeout(S.sched[k]); }); S.sched = {};
     S.tracked = {}; S.remote = {}; S.settingsRemote = null; S.pushed = {}; S.ready = false; S.pending = 0; S.defer = {};
-    S.scoped = false; S.sawMine = false; S.legacy = new Map(); S.where = {}; S.seenIn = {}; S.legacyBy = {};
+    S.online = new Map(); S.presErr = ''; S.legacyOn = false; S.scoped = false; S.sawMine = false; S.legacy = new Map(); S.where = {}; S.seenIn = {}; S.legacyBy = {};
   }
   function wipeLocal() {
     Object.keys(COLS).forEach(function (k) { RAW_SET.call(localStorage, k, '[]'); });
@@ -637,12 +651,12 @@
       listen('tp_deposits', d.ref('app_deposits'), sh);
       if (PAGE === 'admin') {
         listen('tp_withdrawals', d.ref('app_withdrawals'), sh);
-        listen('tp_notifications', d.ref('app_notifications'), sh);
+        listen('tp_notifications', d.ref('app_notifications').orderByChild('ts').limitToLast(500), sh);
         listen('tp_tickets', d.ref('app_tickets'), sh);
         listen('tp_messages', d.ref('app_messages'), sh);
-        listen('tp_adminlog', d.ref('app_adminlog'), sh);
+        listen('tp_adminlog', d.ref('app_adminlog').orderByChild('ts').limitToLast(300), sh);
         listen('tp_deleted_users', d.ref('deleted_users'), sh);
-        listenLegacyUsers(sh);
+        listenPresence(sh);
       }
     });
     if (PAGE !== 'admin') {
@@ -661,10 +675,55 @@
     wipeLocal();
     if (hadSession && PAGE === 'user' && !S.removed) { try { location.reload(); } catch (e) {} }
   }
+  // ---------- ADMIN: sabai shard ek sath (race-free) ----------
+  // Pahile har shard ko auth event le alag start()/stopAll() chalauthyo: B ko admin account unverified bhaye
+  // B ko event le A ko listener pani maardinthyo => admin panel ma kunai user dekhindainthyo. Aba sabai shard
+  // ko state ek choti hernchha: verified shard ma matra listen, unverified lai badge ma dekhaune + auto-recheck.
+  var _admT = 0, _admPoll = 0, _admSig = '';
+  function adminSchedule() { clearTimeout(_admT); _admT = setTimeout(adminRestart, 200); }
+  function adminVerifyPoll() {
+    if (_admPoll) return;
+    _admPoll = setInterval(async function () {
+      var pend = SHARD_IDS.filter(function (id) { return SH[id].auth.currentUser && !adminOk(id); });
+      if (!pend.length) { clearInterval(_admPoll); _admPoll = 0; return; }
+      var got = false;
+      for (var i = 0; i < pend.length; i++) {
+        var u = SH[pend[i]].auth.currentUser; if (!u) continue;
+        try { await u.reload(); if (u.emailVerified) { await u.getIdToken(true); got = true; toast('Shard ' + pend[i] + ' ko admin email verify bhayo — data load hudai chha.'); } } catch (e) {}
+      }
+      if (got) { _admSig = ''; adminSchedule(); }
+    }, 7000);
+  }
+  function adminRestart() {
+    var sig = SHARD_IDS.map(function (id) { var u = SH[id].auth.currentUser; return id + ':' + (u ? u.uid + (adminOk(id) ? 'v' : 'u') : '-'); }).join('|');
+    if (sig === _admSig && S.fuid) return;            // kehi pharak chaina
+    _admSig = sig;
+    var any = SHARD_IDS.filter(function (id) { return SH[id].auth.currentUser; });
+    if (!any.length) { onAuthUser(null); return; }
+    var ver = any.filter(adminOk);
+    SHARD_IDS.forEach(function (id) {
+      var u = SH[id].auth.currentUser;
+      if (u && !adminOk(id)) S.shErr[id] = 'admin email verify bhayena (yo shard ko email ma link thichnus) — data load hudaina';
+      else if (S.shErr[id] && /verify bhayena/.test(S.shErr[id])) delete S.shErr[id];
+    });
+    if (any.length > ver.length) adminVerifyPoll();
+    var keep = Object.assign({}, S.shErr);
+    stopAll(); S.shErr = keep;
+    if (!ver.length) { var u0 = SH[any[0]].auth.currentUser; S.fuid = u0.uid; S.email = (u0.email || '').toLowerCase(); return; }
+    var pu = SH[ver[0]].auth.currentUser, _uid = pu.uid;
+    S.fuid = _uid; S.email = (pu.email || '').toLowerCase(); S.removed = false;
+    isAdminEmail(S.email).then(function (ok) {
+      if (S.fuid !== _uid) return;
+      S.isAdmin = ok;
+      if (!S.isAdmin) return;
+      begin();
+    });
+  }
   SHARD_IDS.forEach(function (id) {
     SH[id].auth.onAuthStateChanged(function (u) {
-      if (u) { if (PAGE !== 'admin' && ACT !== id) setActive(id); onAuthUser(u); }
-      else if ((PAGE === 'admin' ? SHARD_IDS[0] : ACT) === id) onAuthUser(null);
+      if (PAGE === 'admin') { adminSchedule(); return; }
+      if (u) { if (ACT !== id) setActive(id); onAuthUser(u); }
+      else if (ACT === id) onAuthUser(null);
     });
   });
 
@@ -771,6 +830,9 @@
     myProfile: myProfile,
     purgeDeletedAccountNow: purgeDeletedAccountNow,
     legacyUsers: function () { return S.legacy; },
+    onlineList: function () { return S.online ? Array.from(S.online.values()) : []; },
+    presenceError: function () { return S.presErr || ''; },
+    startLegacy: function () { if (PAGE !== 'admin' || !S.isAdmin || S.legacyOn) return; S.legacyOn = true; liveShards().forEach(function (id) { listenLegacyUsers(id); }); },
     isTombstoned: async function (fuid) {
       try { return (await db.ref('deleted_users/' + idStr(fuid)).once('value')).exists(); } catch (e) { return false; }
     },
@@ -1116,6 +1178,8 @@
                 <p class="px-3 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Users</p>
                 <a href="javascript:void(0)" onclick="adminGoTo('sec-users')" id="sb-sec-users" class="sidebar-link"><i class="fa-solid fa-users w-5 text-center"></i><span class="flex-1">Manage Users</span></a>
                 <a href="javascript:void(0)" onclick="adminGoTo('sec-history')" id="sb-sec-history" class="sidebar-link"><i class="fa-solid fa-clock-rotate-left w-5 text-center"></i><span class="flex-1">Submissions History</span></a>
+                <a href="javascript:void(0)" onclick="adminOpenStatement()" id="sb-statement" class="sidebar-link"><i class="fa-solid fa-file-invoice w-5 text-center"></i><span>User Statement</span></a>
+                <a href="javascript:void(0)" onclick="adminOpenOnline()" id="sb-online" class="sidebar-link"><i class="fa-solid fa-circle-check w-5 text-center text-emerald-500"></i><span>Online Users</span><span id="sb-online-count" class="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500 text-white">0</span></a>
                 <a href="javascript:void(0)" onclick="adminOpenCredentials()" id="sb-credentials" class="sidebar-link"><i class="fa-solid fa-key w-5 text-center"></i><span>User Credentials</span></a>
                 <a href="javascript:void(0)" onclick="adminOpenAdminLog()" id="sb-adminlog" class="sidebar-link"><i class="fa-solid fa-clipboard-list w-5 text-center"></i><span>Admin Action Log</span></a>
                 <p class="px-3 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Finance</p>
@@ -1498,6 +1562,42 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </section>
+
+            <section id="statement-section" class="hidden space-y-6">
+                <div class="bg-slate-950 text-white p-6 md:p-8 rounded-3xl shadow-2xl flex justify-between items-center border border-slate-800">
+                    <div>
+                        <span class="bg-indigo-500/20 text-indigo-400 text-xs px-3.5 py-1 rounded-full font-bold uppercase tracking-wider border border-indigo-500/30">Ledger</span>
+                        <h2 class="text-2xl md:text-3xl font-extrabold mt-2 tracking-tight">User Statement</h2>
+                    </div>
+                    <button onclick="showAdminTab('control')" class="bg-slate-800 hover:bg-slate-700 px-4 py-2.5 rounded-xl text-xs font-bold transition border border-slate-700 shadow-lg">Back</button>
+                </div>
+                <div class="bg-slate-800 p-5 md:p-6 rounded-3xl shadow-xl border border-slate-700/60 space-y-4">
+                    <div class="flex flex-col sm:flex-row gap-3">
+                        <input type="text" id="statement-uid" onkeydown="if(event.key==='Enter')renderStatement(true)" placeholder="User UID halnus (jastai UID-1234567)" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <button onclick="renderStatement(true)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl text-sm font-bold transition shadow">Show Statement</button>
+                    </div>
+                    <p id="statement-msg" class="text-xs text-red-500 font-bold"></p>
+                    <div id="statement-out" class="space-y-4"></div>
+                </div>
+            </section>
+
+            <section id="online-section" class="hidden space-y-6">
+                <div class="bg-slate-950 text-white p-6 md:p-8 rounded-3xl shadow-2xl flex justify-between items-center border border-slate-800">
+                    <div>
+                        <span class="bg-emerald-500/20 text-emerald-400 text-xs px-3.5 py-1 rounded-full font-bold uppercase tracking-wider border border-emerald-500/30">Real-time</span>
+                        <h2 class="text-2xl md:text-3xl font-extrabold mt-2 tracking-tight">Online Users</h2>
+                    </div>
+                    <button onclick="showAdminTab('control')" class="bg-slate-800 hover:bg-slate-700 px-4 py-2.5 rounded-xl text-xs font-bold transition border border-slate-700 shadow-lg">Back</button>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700/60 shadow"><p class="text-xs font-bold text-slate-400 uppercase">Total Users</p><p id="online-total" class="text-3xl font-extrabold text-slate-100 mt-1">0</p></div>
+                    <div class="bg-slate-800 p-5 rounded-2xl border border-slate-700/60 shadow"><p class="text-xs font-bold text-slate-400 uppercase">Online Now</p><p class="text-3xl font-extrabold text-emerald-400 mt-1"><i class="fa-solid fa-circle-check text-2xl mr-1"></i><span id="online-count">0</span></p></div>
+                </div>
+                <div class="bg-slate-800 p-4 md:p-6 rounded-3xl shadow-xl border border-slate-700/60">
+                    <p id="online-status" class="text-xs text-red-500 font-bold mb-2"></p>
+                    <div id="online-list" style="max-height:28rem;overflow-y:auto" class="space-y-2 pr-1"></div>
                 </div>
             </section>
 
@@ -2890,12 +2990,14 @@ function closeTaskAndRefund(taskId, by) {
         }
         function showAdminTab(tab) {
             if (tab !== 'credentials' && typeof credLock === 'function') credLock();
-            const ids = { control: 'admin-section', dashtasks: 'dashtasks-section', finance: 'finance-section', credentials: 'credentials-section', adminlog: 'adminlog-section', esewa: 'esewa-section' };
+            const ids = { control: 'admin-section', dashtasks: 'dashtasks-section', finance: 'finance-section', credentials: 'credentials-section', online: 'online-section', statement: 'statement-section', adminlog: 'adminlog-section', esewa: 'esewa-section' };
             Object.keys(ids).forEach(k => document.getElementById(ids[k]).classList.toggle('hidden', k !== tab));
             if (tab === 'control') { loadAdminData(); loadSettingsIntoForm(); setSidebarActive('sec-stats'); }
             if (tab === 'dashtasks') { loadAdminData(); setSidebarActive('sb-dashtasks'); }
             if (tab === 'finance') { loadAdminData(); setSidebarActive('sb-finance'); }
-            if (tab === 'credentials') { loadUserCredentials(); setSidebarActive('sb-credentials'); }
+            if (tab === 'credentials') { try { TPSync.startLegacy(); } catch (e) {} loadUserCredentials(); setSidebarActive('sb-credentials'); }
+            if (tab === 'statement') { setSidebarActive('sb-statement'); if (document.getElementById('statement-uid').value) renderStatement(); }
+            if (tab === 'online') { renderOnline(); setSidebarActive('sb-online'); }
             if (tab === 'adminlog') { renderAdminLog(); setSidebarActive('sb-adminlog'); }
             if (tab === 'esewa') { renderEsewa(); setSidebarActive('sb-esewa'); }
             window.scrollTo({ top: 0 });
@@ -3011,6 +3113,101 @@ function closeTaskAndRefund(taskId, by) {
         function openAdminSidebar() { document.getElementById('admin-sidebar').classList.add('sidebar-open'); document.getElementById('admin-sidebar-overlay').classList.remove('hidden'); }
         function closeAdminSidebar() { document.getElementById('admin-sidebar').classList.remove('sidebar-open'); document.getElementById('admin-sidebar-overlay').classList.add('hidden'); }
         function adminOpenCredentials() { closeAdminSidebar(); showAdminTab('credentials'); }
+        function adminOpenOnline() { closeAdminSidebar(); showAdminTab('online'); }
+        function renderOnline() {
+            const box = document.getElementById('online-list'); if (!box || !window.TPSync) return;
+            const on = (TPSync.onlineList ? TPSync.onlineList() : []).slice();
+            let users = []; try { users = JSON.parse(localStorage.getItem('tp_users') || '[]'); } catch (e) {}
+            const byF = {}; users.forEach(u => { if (u && u.firebaseUid) byF[u.firebaseUid] = u; });
+            setTxt('online-total', users.length); setTxt('online-count', on.length); setTxt('sb-online-count', on.length);
+            const st = document.getElementById('online-status'); if (st) st.textContent = TPSync.presenceError ? TPSync.presenceError() : '';
+            if (!on.length) { box.innerHTML = '<p class="p-6 text-center text-slate-500 text-xs">Ahile kunai user online chhaina.</p>'; return; }
+            on.sort((a, b) => String((byF[a.fid] || a).name || '').localeCompare(String((byF[b.fid] || b).name || '')));
+            box.innerHTML = on.map(o => {
+                const u = byF[o.fid] || {};
+                return `<div class="flex items-center gap-3 p-3 rounded-xl border border-slate-700/60 bg-slate-900">
+                    <i class="fa-solid fa-circle-check text-emerald-500 text-lg"></i>
+                    <div class="min-w-0 flex-1"><p class="font-bold text-slate-200 text-sm truncate">${esc(u.name || o.name || '-')}</p>
+                    <p class="text-xs text-slate-400 truncate">${esc(u.email || '')} ${u.uid || o.uid ? ' &middot; ' + esc(u.uid || o.uid) : ''}</p></div>
+                    <span class="text-xs font-bold text-emerald-400">${u.balance != null ? 'Rs. ' + esc(u.balance) : ''}</span></div>`;
+            }).join('');
+        }
+        // ---------- USER STATEMENT (bank-style ledger, admin only) ----------
+        function adminOpenStatement() { closeAdminSidebar(); showAdminTab('statement'); }
+        function stmtMoney(n) { return Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+        function stmtDate(ts) { return ts > 1e12 ? new Date(ts).toLocaleString() : '-'; }
+        function stmtBuild(u) {
+            const g = k => { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) { return []; } };
+            const rows = [];
+            g('tp_deposits').filter(d => d.uid === u.uid).forEach(d => {
+                const ok = d.status === 'Approved';
+                rows.push({ ts: Number(ok ? (d.reviewedAt || d.depositId) : d.depositId) || 0, kind: 'dep', desc: 'Deposit (Add Fund)' + (d.method ? ' - ' + d.method : ''), ref: d.account || '', cr: ok ? round2(d.amount) : 0, dr: 0, info: ok ? '' : (d.status + ' - ' + stmtMoney(d.amount)) });
+            });
+            g('tp_withdrawals').filter(w => w.uid === u.uid).forEach(w => {
+                const t = Number(w.withdrawId) || 0;
+                rows.push({ ts: t, kind: 'wd', desc: 'Withdrawal' + (w.method ? ' - ' + w.method : '') + ' (' + (w.status || 'Pending') + ')', ref: w.account || '', cr: 0, dr: round2(w.amount), info: '' });
+                if (w.status === 'Rejected') rows.push({ ts: Number(w.reviewedAt || w.rejectedAt || w.paidAt) || t + 1, kind: 'ref', desc: 'Withdrawal refund (Rejected)', ref: w.account || '', cr: round2(w.amount), dr: 0, info: '' });
+            });
+            g('tp_submissions').filter(x => x.uid === u.uid && x.status === 'Approved').forEach(x => {
+                const gross = round2(x.reward), pct = x.taxPct || TASK_TAX_PCT;
+                const tax = round2(x.taxAmount != null ? x.taxAmount : gross * pct / 100), t = Number(x.reviewedAt || x.subId) || 0;
+                rows.push({ ts: t, kind: 'task', desc: 'Task reward - ' + (x.taskTitle || 'Task'), ref: 'Proof #' + x.subId, cr: gross, dr: 0, info: '' });
+                rows.push({ ts: t + 0.5, kind: 'tax', desc: 'Task tax (' + pct + '%)', ref: 'Proof #' + x.subId, cr: 0, dr: tax, info: '' });
+            });
+            rows.sort((a, b) => a.ts - b.ts);
+            let bal = 0;
+            rows.forEach(r => { if (!r.info) { bal = round2(bal + r.cr - r.dr); r.bal = bal; } });
+            const cur = round2(u.balance || 0), diff = round2(cur - bal);
+            if (Math.abs(diff) >= 0.01) rows.push({ ts: Date.now(), kind: 'adj', desc: 'Other adjustments (task funding/refund, referral & bonus, admin changes)', ref: '', cr: diff > 0 ? diff : 0, dr: diff < 0 ? -diff : 0, info: '', bal: cur });
+            return rows;
+        }
+        function renderStatement(manual) {
+            const inp = document.getElementById('statement-uid'), msg = document.getElementById('statement-msg'), out = document.getElementById('statement-out');
+            if (!inp || !out) return;
+            const q = inp.value.trim().toLowerCase(); msg.textContent = '';
+            if (!q) { out.innerHTML = ''; window._stmt = null; return; }
+            let users = []; try { users = JSON.parse(localStorage.getItem('tp_users') || '[]'); } catch (e) {}
+            const u = users.find(x => String(x.uid || '').toLowerCase() === q) || users.find(x => String(x.uid || '').toLowerCase() === 'uid-' + q) || users.find(x => String(x.email || '').toLowerCase() === q);
+            if (!u) { out.innerHTML = ''; window._stmt = null; if (manual) msg.textContent = 'Yo UID ko user bhetiena. UID sahi chha ki check garnus.'; return; }
+            const rows = stmtBuild(u);
+            const sum = k => round2(rows.filter(r => r.kind === k).reduce((n, r) => n + r.cr + r.dr, 0));
+            const dep = sum('dep'), wd = sum('wd') - sum('ref'), gross = sum('task'), tax = sum('tax');
+            const tc = round2(rows.filter(r => !r.info).reduce((n, r) => n + r.cr, 0)), td = round2(rows.filter(r => !r.info).reduce((n, r) => n + r.dr, 0));
+            window._stmt = { u, rows, tc, td };
+            const card = (l, v, c) => `<div class="bg-slate-900 p-3 rounded-xl border border-slate-700/60"><p class="text-[10px] font-bold text-slate-400 uppercase">${l}</p><p class="text-base font-extrabold ${c || 'text-slate-100'} mt-0.5">Rs. ${stmtMoney(v)}</p></div>`;
+            const body = rows.map(r => r.info
+                ? `<tr class="border-b border-slate-700/50 opacity-60 italic"><td class="p-3 text-xs whitespace-nowrap">${esc(stmtDate(r.ts))}</td><td class="p-3 text-xs">${esc(r.desc)}</td><td class="p-3 text-xs">${esc(r.ref)}</td><td class="p-3 text-right">-</td><td class="p-3 text-right">-</td><td class="p-3 text-right text-xs">${esc(r.info)}</td></tr>`
+                : `<tr class="border-b border-slate-700/50"><td class="p-3 text-xs whitespace-nowrap">${esc(stmtDate(r.ts))}</td><td class="p-3 text-xs font-semibold text-slate-200">${esc(r.desc)}</td><td class="p-3 text-xs text-slate-400">${esc(r.ref)}</td><td class="p-3 text-right text-xs font-bold text-rose-500">${r.dr ? stmtMoney(r.dr) : ''}</td><td class="p-3 text-right text-xs font-bold text-emerald-500">${r.cr ? stmtMoney(r.cr) : ''}</td><td class="p-3 text-right text-xs font-bold text-slate-100">${stmtMoney(r.bal)}</td></tr>`).join('');
+            out.innerHTML = `
+                <div class="bg-slate-900 p-4 rounded-2xl border border-slate-700/60 flex flex-wrap justify-between gap-3">
+                    <div><p class="text-lg font-extrabold text-slate-100">${esc(u.name || '-')}</p><p class="text-xs text-slate-400">${esc(u.uid)} &middot; ${esc(u.email || '')}</p><p class="text-[11px] text-slate-500">Joined: ${u.joinedAt ? esc(new Date(u.joinedAt).toLocaleDateString()) : '-'} &middot; Statement: ${esc(new Date().toLocaleString())}</p></div>
+                    <div class="text-right"><p class="text-[10px] font-bold text-slate-400 uppercase">Current Balance</p><p class="text-2xl font-extrabold text-emerald-500">Rs. ${stmtMoney(u.balance)}</p></div>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-3">${card('Total Deposit', dep, 'text-emerald-500')}${card('Total Withdraw', wd, 'text-rose-500')}${card('Task Earned (gross)', gross)}${card('Tax Deducted', tax, 'text-amber-500')}${card('Net Task Income', round2(gross - tax), 'text-teal-500')}</div>
+                <div class="flex gap-2"><button onclick="stmtCSV()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold border border-slate-600">Download CSV</button><button onclick="stmtPrint()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold border border-slate-600">Print</button></div>
+                <div style="max-height:32rem;overflow:auto" class="rounded-xl border border-slate-700/60"><table class="w-full text-left border-collapse min-w-[720px]" id="stmt-table">
+                    <thead style="position:sticky;top:0" class="bg-slate-900"><tr class="text-slate-400 text-xs uppercase tracking-wider border-b border-slate-700/60"><th class="p-3">Date</th><th class="p-3">Description</th><th class="p-3">Reference</th><th class="p-3 text-right">Debit (-)</th><th class="p-3 text-right">Credit (+)</th><th class="p-3 text-right">Balance</th></tr></thead>
+                    <tbody>${body || '<tr><td colspan="6" class="p-6 text-center text-slate-500 text-xs">Kunai transaction chhaina.</td></tr>'}</tbody>
+                    <tfoot><tr class="bg-slate-900 font-extrabold text-xs"><td class="p-3" colspan="3">TOTAL</td><td class="p-3 text-right text-rose-500">${stmtMoney(td)}</td><td class="p-3 text-right text-emerald-500">${stmtMoney(tc)}</td><td class="p-3 text-right text-slate-100">${stmtMoney(u.balance)}</td></tr></tfoot>
+                </table></div>`;
+        }
+        function stmtCSV() {
+            const st = window._stmt; if (!st) return;
+            const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+            const lines = [['Date', 'Description', 'Reference', 'Debit', 'Credit', 'Balance', 'Note'].map(q).join(',')];
+            st.rows.forEach(r => lines.push([stmtDate(r.ts), r.desc, r.ref, r.info ? '' : r.dr, r.info ? '' : r.cr, r.info ? '' : r.bal, r.info].map(q).join(',')));
+            const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+            a.download = 'statement-' + st.u.uid + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+        }
+        function stmtPrint() {
+            const st = window._stmt, t = document.getElementById('stmt-table'); if (!st || !t) return;
+            const w = window.open('', '_blank'); if (!w) { showToast('Popup block bhayo.'); return; }
+            w.document.write('<html><head><title>Statement ' + esc(st.u.uid) + '</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#111}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #ccc;padding:6px;text-align:left}th:nth-child(n+4),td:nth-child(n+4){text-align:right}</style></head><body><h2>Account Statement</h2><p><b>' + esc(st.u.name || '') + '</b><br>' + esc(st.u.uid) + ' &middot; ' + esc(st.u.email || '') + '<br>Current balance: Rs. ' + stmtMoney(st.u.balance) + '<br>Generated: ' + esc(new Date().toLocaleString()) + '</p>' + t.outerHTML + '</body></html>');
+            w.document.close(); w.focus(); setTimeout(function () { w.print(); }, 300);
+        }
+        setInterval(function () { const sc = document.getElementById('statement-section'); if (sc && !sc.classList.contains('hidden')) renderStatement(); }, 4000);
+        window.tpOnlineChanged = renderOnline;
+        setInterval(function () { const sc = document.getElementById('online-section'); if (sc && !sc.classList.contains('hidden')) renderOnline(); }, 4000);
         function adminGoTo(id) {
             closeAdminSidebar();
             if (document.getElementById('admin-section').classList.contains('hidden')) showAdminTab('control');
@@ -3542,16 +3739,21 @@ tpWatchPaging(['admin-tasks-tbody', 'admin-users-tbody', 'admin-all-history-tbod
                 img.src = dataUrl;
             });
         }
+        async function _putAllShards(key, obj) {
+            const ids = TPSync.SHARD_IDS.filter(id => !!TPSync.SH[id].auth.currentUser);
+            const rs = await Promise.allSettled(ids.map(id => TPSync.SH[id].db.ref('app_images/' + key).set(obj)));
+            if (!rs.some(r => r.status === 'fulfilled')) throw ((rs[0] && rs[0].reason) || new Error('image save failed'));
+        }
         window.saveImageToDB = async function (dataUrl) {
             dataUrl = await _shrinkDataUrl(dataUrl);
             const key = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
             try { await _idbPut(key, dataUrl); } catch (e) {}
-            await db.ref('app_images/' + key).set({ data: dataUrl, ts: Date.now(), by: auth.currentUser ? auth.currentUser.uid : null });
+            await _putAllShards(key, { data: dataUrl, ts: Date.now(), by: auth.currentUser ? auth.currentUser.uid : null });
             return key;
         };
         window.saveMediaToDB = async function (dataUrl) {
             const key = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
-            await db.ref('app_images/' + key).set({ data: dataUrl, ts: Date.now(), by: auth.currentUser ? auth.currentUser.uid : null });
+            await _putAllShards(key, { data: dataUrl, ts: Date.now(), by: auth.currentUser ? auth.currentUser.uid : null });
             try { await _idbPut(key, dataUrl); } catch (e) {}
             return key;
         };

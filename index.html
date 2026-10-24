@@ -85,6 +85,14 @@
     SH[s.id] = { id: s.id, app: ap, auth: ap.auth(), db: ap.database() };
   });
   var ACT = SHARD_IDS[0];
+  // FIX: logout garda auth pahile null huncha ra presence/{uid} remove() 'permission denied' bhayera online ramro rahancha.
+  // Aba kunai pani signOut() (user page ko afnai code le gare pani) agadi presence pahile hatauchha.
+  SHARD_IDS.forEach(function (id) {
+    var a = SH[id].auth, orig = a.signOut.bind(a);
+    a.signOut = function () {
+      return (PAGE === 'admin' ? Promise.resolve() : presenceOff()).then(function () { return orig(); });
+    };
+  });
   // Admin ke lagi shard "ok" ho ki hoina: A ma email verified huna parcha; 
   // auto-banekoe account hunchha, alag email verify garnu pardaina (B ko rules le admin email lai verify bina pani maan chhan).
   function adminOk(id) {
@@ -223,6 +231,14 @@
     where: {}, seenIn: {}, legacyBy: {}, shErr: {}
   };
 
+  // Id haru number nabhaye / uid ma ajib akshar bhaye (inline onclick / attribute ma halda XSS hune) tyo doc skip garincha
+  var NUMID = { tp_tasks: 'id', tp_submissions: 'subId', tp_deposits: 'depositId', tp_withdrawals: 'withdrawId' };
+  function okDoc(k, d) {
+    var f = NUMID[k];
+    if (f && !(typeof d[f] === 'number' && isFinite(d[f]))) return false;
+    if (k === 'tp_users' && d.uid != null && !/^[A-Za-z0-9_-]{1,60}$/.test(String(d.uid))) return false;
+    return true;
+  }
   // Realtime Database key ma  . $ # [ ] /  hudaina
   function idStr(v) { return String(v).replace(/[.$#\[\]\/]/g, '_'); }
   function canon(v) {
@@ -494,6 +510,7 @@
     }
     function put(snap, isAdd) {
       var d = dec(snap.val()); if (!d || typeof d !== 'object') return;
+      if (!okDoc(lsKey, d)) return;   // galat id (script/quote halera XSS garne koshish) bhayeko doc ignore
       var id = snap.key, had = m.has(id);
       m.set(id, d); if (S.shErr[sh]) delete S.shErr[sh]; S.where[lsKey + '|' + id] = sh; (S.seenIn[lsKey + '|' + id] = S.seenIn[lsKey + '|' + id] || {})[sh] = 1;
       if (first) return;
@@ -543,37 +560,53 @@
     function put(s) { var v = s.val(); if (!v || typeof v !== 'object') return; S.online.set(s.key, { fid: s.key, name: v.name || '', uid: v.uid || '', ts: v.ts || 0, shard: sh }); S.presErr = ''; bump(); }
     function fail(err) { S.presErr = isDenied(err) ? 'Online users padhna rules le rokyo (permission denied). Naya firebase rules publish garnus.' : String((err && (err.code || err.message)) || err); bump(); }
     var a = r.on('child_added', put, fail), c = r.on('child_changed', put, fail), d = r.on('child_removed', function (s) { S.online.delete(s.key); bump(); }, fail);
-    S.unsubs.push(function () { try { r.off('child_added', a); r.off('child_changed', c); r.off('child_removed', d); } catch (e) {} });
+    var offR = SH[sh].db.ref('.info/serverTimeOffset'), offH = offR.on('value', function (s) { S.srvOff = s.val() || 0; bump(); });
+    var sweep = setInterval(bump, 20000);      // heartbeat (30s) aayena bhane 100s pachi offline dekhauna
+    S.unsubs.push(function () { try { r.off('child_added', a); r.off('child_changed', c); r.off('child_removed', d); offR.off('value', offH); clearInterval(sweep); } catch (e) {} });
   }
   // ---------- USER PAGE: online presence lekhne (admin le yehi padhcha) ----------
   // presence/{firebaseUid} = { name, uid, ts }.  Tab band / internet jada server le afai hatauncha (onDisconnect).
+  var PRES = null;
+  // presence hatau: signOut / account delete / tab band -- sabai agadi yehi chalcha (auth abhai valid huda)
+  function presenceOff() {
+    var p = PRES; if (!p) return Promise.resolve();
+    PRES = null; p.dead = true;
+    try { clearInterval(p.hb); } catch (e) {}
+    try { p.conn.off('value', p.ch); } catch (e) {}
+    document.removeEventListener('visibilitychange', p.onVis);
+    window.removeEventListener('pagehide', p.onHide); window.removeEventListener('beforeunload', p.onHide);
+    var done = Promise.resolve();
+    try { p.ref.onDisconnect().cancel(); } catch (e) {}
+    try { done = p.ref.remove(); } catch (e) {}
+    return Promise.race([Promise.resolve(done).catch(function (e) { console.warn('presence remove', (e && e.code) || e); }), new Promise(function (r) { setTimeout(r, 3000); })]);
+  }
   function startPresenceWriter() {
     var fuid = S.fuid; if (!fuid) return;
-    var pdb = SH[ACT].db, ref = pdb.ref('presence/' + idStr(fuid)), conn = pdb.ref('.info/connected'), hb = 0;
+    presenceOff();
+    var pdb = SH[ACT].db, ref = pdb.ref('presence/' + idStr(fuid)), conn = pdb.ref('.info/connected');
+    var P = PRES = { ref: ref, conn: conn, dead: false };
     function who() { var m = null; try { m = myProfile(); } catch (e) {} if (!m) { try { m = JSON.parse(RAW_GET.call(localStorage, 'tp_activeUser') || 'null'); } catch (e) {} } return m || {}; }
+    function ok() { return !P.dead && PRES === P && S.fuid === fuid; }
+    function val() { var m = who(); return { online: true, name: m.name || '', uid: m.uid || '', ts: SV.TIMESTAMP }; }
     function mark() {
-      if (S.fuid !== fuid) return;
-      var m = who();
+      if (!ok()) return;
       try {
         ref.onDisconnect().remove().then(function () {
-          return ref.set({ name: m.name || '', uid: m.uid || '', ts: SV.TIMESTAMP });
+          if (!ok()) { try { ref.onDisconnect().cancel(); } catch (e) {} return; }
+          return ref.set(val());
         }).catch(function (e) { console.warn('presence write', (e && e.code) || e); });
       } catch (e) {}
     }
     function offline() { try { ref.remove(); } catch (e) {} }
-    var ch = conn.on('value', function (s) { if (s.val() === true && !document.hidden) mark(); });
-    var onVis = function () { if (document.hidden) offline(); else mark(); };
-    var onHide = function () { offline(); };
-    document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('pagehide', onHide);
-    window.addEventListener('beforeunload', onHide);
-    hb = setInterval(function () { if (!document.hidden && S.fuid === fuid) { try { ref.child('ts').set(SV.TIMESTAMP); } catch (e) {} } }, 30000);
-    S.unsubs.push(function () {
-      try { conn.off('value', ch); } catch (e) {}
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('pagehide', onHide); window.removeEventListener('beforeunload', onHide);
-      clearInterval(hb); try { ref.remove(); } catch (e) {}
-    });
+    P.ch = conn.on('value', function (s) { if (s.val() === true && !document.hidden) mark(); });
+    P.onVis = function () { if (document.hidden) offline(); else mark(); };
+    P.onHide = function () { offline(); };
+    document.addEventListener('visibilitychange', P.onVis);
+    window.addEventListener('pagehide', P.onHide);
+    window.addEventListener('beforeunload', P.onHide);
+    // heartbeat: pura object lekhcha (hatieko bhaye pani firi aucha, tara logout pachi P.dead le rokcha)
+    P.hb = setInterval(function () { if (ok() && !document.hidden) { try { ref.set(val()).catch(function () {}); } catch (e) {} } }, 30000);
+    S.unsubs.push(function () { presenceOff(); });
   }
   function listenLegacyUsers(sh) {
     sh = sh || ACT;
@@ -633,6 +666,7 @@
     if (S.removed || PAGE !== 'user') return;
     S.removed = true;
     S.delPromise = (async function () {
+      try { await presenceOff(); } catch (e) {}
       try { if (auth.currentUser) await auth.currentUser.delete(); } catch (e) { console.warn('auth delete', e.code || e); }
       try { await auth.signOut(); } catch (e) {}
     })();
@@ -640,6 +674,7 @@
   }
   async function purgeDeletedAccountNow() {          // used by login flow
     S.removed = true;
+    try { await presenceOff(); } catch (e) {}
     try { if (auth.currentUser) await auth.currentUser.delete(); } catch (e) { console.warn('auth delete', e.code || e); }
     try { await auth.signOut(); } catch (e) {}
   }
@@ -861,7 +896,11 @@
     myProfile: myProfile,
     purgeDeletedAccountNow: purgeDeletedAccountNow,
     legacyUsers: function () { return S.legacy; },
-    onlineList: function () { return S.online ? Array.from(S.online.values()) : []; },
+    onlineList: function () {
+      if (!S.online) return [];
+      var now = Date.now() + (S.srvOff || 0);
+      return Array.from(S.online.values()).filter(function (o) { return !o.ts || (now - o.ts) < 100000; });
+    },
     presenceError: function () { return S.presErr || ''; },
     startLegacy: function () { if (PAGE !== 'admin' || !S.isAdmin || S.legacyOn) return; S.legacyOn = true; liveShards().forEach(function (id) { listenLegacyUsers(id); }); },
     isTombstoned: async function (fuid) {
@@ -2259,6 +2298,8 @@ function hydrateThumbs() {
 
 // ---------- SHARED TASK-ESCROW CORE (same code in index.html & admin.html) ----------
 function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// inline onclick ma halne id: sirf akshar/ankha/_/- matra (quote ra kosh haru hataincha)
+function jsId(v) { return String(v == null ? '' : v).replace(/[^A-Za-z0-9_-]/g, ''); }
 function round2(n) { return Math.round((parseFloat(n) || 0) * 100) / 100; }
 function statusBadgeCls(st) {
     return st === 'Approved' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
@@ -2303,7 +2344,7 @@ function applySubmissionReview(subId, newStatus, remark, reviewer, reviewerUid) 
         if (isUserTask && !task) return { ok: false, msg: 'Task delete bhaisakeko cha — approve garna mildaina, reject garnus.' };
     }
     const who = reviewer === 'poster' ? 'Task Owner' : 'Admin';
-    const reward = round2(sub.reward);
+    const reward = round2(task && task.reward != null ? task.reward : sub.reward);   // task ko reward nai pramaan (worker le submission ma lekhne number hoina)
     const taxAmt = round2(reward * TASK_TAX_PCT / 100);
     const netAmt = round2(reward - taxAmt);
     let refBonus = null, posterRefund = 0;
@@ -2424,8 +2465,8 @@ function closeTaskAndRefund(taskId, by) {
                         <td class="p-4 space-y-2 min-w-[220px]">
                             <input type="text" id="admin-taskreq-remark-${t.id}" placeholder="Remark / karan (reject garda must)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
                             <div class="flex space-x-2">
-                                <button onclick="reviewTaskRequest(${t.id}, 'Approved')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Approve</button>
-                                <button onclick="reviewTaskRequest(${t.id}, 'Rejected')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject</button>
+                                <button onclick="reviewTaskRequest(${Number(t.id)}, 'Approved')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Approve</button>
+                                <button onclick="reviewTaskRequest(${Number(t.id)}, 'Rejected')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject</button>
                             </div>
                         </td>
                     </tr>`;
@@ -2477,7 +2518,7 @@ function closeTaskAndRefund(taskId, by) {
                 const screenshotCell = t.image
                     ? `${thumbHtml(t.image)}`
                     : '<span class="text-[11px] text-slate-500">-</span>';
-                const closeBtn = (t.postedBy && status === 'Approved') ? `<button onclick="adminCloseTask(${t.id})" title="Close & refund" class="bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-lock"></i></button>` : '';
+                const closeBtn = (t.postedBy && status === 'Approved') ? `<button onclick="adminCloseTask(${Number(t.id)})" title="Close & refund" class="bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-lock"></i></button>` : '';
                 tbody.innerHTML += `
                     <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition">
                         <td class="p-4 font-medium text-slate-200 max-w-[260px]">${esc(t.title)}${t.description ? `<p class="text-[11px] text-slate-400 font-normal mt-1 whitespace-pre-line">${linkify(t.description)}</p>` : ''}${t.link ? `<div class="mt-1.5">${linkBtnHtml(t.link)}</div>` : ''}${t.adminRemark && t.postedBy ? `<br><span class="text-[10px] text-slate-500">${esc(t.adminRemark)}</span>` : ''}</td>
@@ -2486,7 +2527,7 @@ function closeTaskAndRefund(taskId, by) {
                         <td class="p-4">${postedByLabel}</td>
                         <td class="p-4"><span class="text-xs px-3 py-1 rounded-full font-bold ${statusBadgeCls(status)}">${status}</span></td>
                         <td class="p-4">${screenshotCell}</td>
-                        <td class="p-4 text-right whitespace-nowrap space-x-1.5">${closeBtn}<button onclick="adminEditTask(${t.id})" class="bg-slate-700 hover:bg-slate-600 text-indigo-300 px-3 py-1.5 rounded-xl text-xs font-bold transition border border-slate-600"><i class="fa-solid fa-pen"></i></button><button onclick="adminDeleteTask(${t.id})" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-trash"></i></button></td>
+                        <td class="p-4 text-right whitespace-nowrap space-x-1.5">${closeBtn}<button onclick="adminEditTask(${Number(t.id)})" class="bg-slate-700 hover:bg-slate-600 text-indigo-300 px-3 py-1.5 rounded-xl text-xs font-bold transition border border-slate-600"><i class="fa-solid fa-pen"></i></button><button onclick="adminDeleteTask(${t.id})" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-trash"></i></button></td>
                     </tr>`;
             });
         }
@@ -2581,13 +2622,13 @@ function closeTaskAndRefund(taskId, by) {
             pending.forEach(d => {
                 tbody.innerHTML += `
                     <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition">
-                        <td class="p-4"><b class="text-white">${d.userName}</b><br><span class="text-xs font-mono text-slate-400">${d.uid}</span></td>
-                        <td class="p-4"><b class="text-indigo-400">${d.method}</b><br><span class="text-xs text-slate-400 font-mono">${d.account}</span>${tpDupBadge(d)}</td>
+                        <td class="p-4"><b class="text-white">${esc(d.userName)}</b><br><span class="text-xs font-mono text-slate-400">${esc(d.uid)}</span></td>
+                        <td class="p-4"><b class="text-indigo-400">${esc(d.method)}</b><br><span class="text-xs text-slate-400 font-mono">${esc(d.account)}</span>${tpDupBadge(d)}</td>
                         <td class="p-4 font-bold text-emerald-400">Rs. ${d.amount}</td>
                         <td class="p-4">${thumbHtml(d.image)}</td>
                         <td class="p-4 space-y-2 min-w-[220px]">
                             <input type="text" id="admin-dep-remark-${d.depositId}" placeholder="Remark (optional)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
-                            <div class="flex space-x-2"><button onclick="reviewDeposit(${d.depositId}, 'Approved')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Approve</button><button onclick="reviewDeposit(${d.depositId}, 'Rejected')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject</button></div>
+                            <div class="flex space-x-2"><button onclick="reviewDeposit(${Number(d.depositId)}, 'Approved')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Approve</button><button onclick="reviewDeposit(${Number(d.depositId)}, 'Rejected')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject</button></div>
                         </td>
                     </tr>
                 `;
@@ -2698,12 +2739,12 @@ function closeTaskAndRefund(taskId, by) {
             subs.slice().reverse().forEach(s => {
                 let badge = s.status === 'Approved' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : (s.status === 'Rejected' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-amber-500/10 text-amber-400 border border-amber-500/20');
                 tbody.innerHTML += `
-                    <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition history-row" data-uid="${s.uid}">
-                        <td class="p-4"><b class="text-white">${s.userName}</b><br><span class="text-xs font-mono text-indigo-400">${s.uid}</span></td>
-                        <td class="p-4 font-medium text-slate-200">${s.taskTitle}</td>
+                    <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition history-row" data-uid="${esc(s.uid)}">
+                        <td class="p-4"><b class="text-white">${esc(s.userName)}</b><br><span class="text-xs font-mono text-indigo-400">${esc(s.uid)}</span></td>
+                        <td class="p-4 font-medium text-slate-200">${esc(s.taskTitle)}</td>
                         <td class="p-4 font-bold text-emerald-400">${tpRewardHtml(s)}</td>
                         <td class="p-4"><span class="text-xs px-3 py-1 rounded-full font-bold ${badge}">${s.status}</span></td>
-                        <td class="p-4 text-xs text-slate-300">User: ${s.userRemark}<br><b class="text-indigo-300">Admin: ${s.adminRemark}</b></td>
+                        <td class="p-4 text-xs text-slate-300">User: ${esc(s.userRemark)}<br><b class="text-indigo-300">Admin: ${esc(s.adminRemark)}</b></td>
                         <td class="p-4">${thumbHtml(s.image)}</td>
                     </tr>
                 `;
@@ -2737,19 +2778,19 @@ function closeTaskAndRefund(taskId, by) {
                 let statusBadge = isBanned ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
 
                 tbody.innerHTML += `
-                    <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition admin-user-row" data-search="${(u.name + ' ' + u.email + ' ' + u.uid).toLowerCase()}">
-                        <td class="p-4"><b class="text-white">${u.name}</b> <span class="tp-ol-dot" data-fuid="${u.firebaseUid || ''}" data-uid="${u.uid || ''}"></span><br><span class="text-xs font-mono text-slate-400">${u.uid}</span></td>
-                        <td class="p-4 text-slate-300 text-xs">${u.email}</td>
+                    <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition admin-user-row" data-search="${esc((u.name + ' ' + u.email + ' ' + u.uid).toLowerCase())}">
+                        <td class="p-4"><b class="text-white">${esc(u.name)}</b> <span class="tp-ol-dot" data-fuid="${esc(u.firebaseUid || '')}" data-uid="${esc(u.uid || '')}"></span><br><span class="text-xs font-mono text-slate-400">${esc(u.uid)}</span></td>
+                        <td class="p-4 text-slate-300 text-xs">${esc(u.email)}</td>
                         <td class="p-4">
                             <div class="flex items-center space-x-2">
                                 <span class="font-bold text-emerald-400">Rs. ${(u.balance || 0).toFixed(2)}</span>
-                                <button onclick="adminEditBalance('${u.uid}')" class="text-xs bg-slate-700 hover:bg-slate-600 text-indigo-300 px-2 py-1 rounded border border-slate-600"><i class="fa-solid fa-pen"></i></button>
+                                <button onclick="adminEditBalance('${jsId(u.uid)}')" class="text-xs bg-slate-700 hover:bg-slate-600 text-indigo-300 px-2 py-1 rounded border border-slate-600"><i class="fa-solid fa-pen"></i></button>
                             </div>
                         </td>
                         <td class="p-4"><span class="text-xs px-3 py-1 rounded-full font-bold ${statusBadge}">${u.status || 'Active'}</span></td>
                         <td class="p-4 text-right space-x-1.5">
-                            <button onclick="toggleUserBan('${u.uid}')" class="${banBtnColor} text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">${banBtnText}</button>
-                            <button onclick="adminDeleteUser('${u.uid}')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-trash"></i></button>
+                            <button onclick="toggleUserBan('${jsId(u.uid)}')" class="${banBtnColor} text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">${banBtnText}</button>
+                            <button onclick="adminDeleteUser('${jsId(u.uid)}')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-trash"></i></button>
                         </td>
                     </tr>
                 `;
@@ -2873,8 +2914,8 @@ function closeTaskAndRefund(taskId, by) {
                         <td class="p-4 space-y-2">
                             <input type="text" id="admin-remark-${s.subId}" placeholder="Remark (reject garda must)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
                             <div class="flex space-x-2">
-                                <button onclick="reviewSub(${s.subId}, 'Approved')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Approve</button>
-                                <button onclick="reviewSub(${s.subId}, 'Rejected')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject</button>
+                                <button onclick="reviewSub(${Number(s.subId)}, 'Approved')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Approve</button>
+                                <button onclick="reviewSub(${Number(s.subId)}, 'Rejected')" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject</button>
                             </div>
                         </td>
                     </tr>`;
@@ -2900,14 +2941,14 @@ function closeTaskAndRefund(taskId, by) {
             pending.forEach(w => {
                 tbody.innerHTML += `
                     <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition">
-                        <td class="p-4"><b class="text-white">${w.userName}</b><br><span class="text-xs font-mono text-slate-400">${w.uid}</span></td>
-                        <td class="p-4"><b class="text-indigo-400">${w.method}</b><br><span class="text-xs text-slate-400 font-mono">${w.account}</span></td>
+                        <td class="p-4"><b class="text-white">${esc(w.userName)}</b><br><span class="text-xs font-mono text-slate-400">${esc(w.uid)}</span></td>
+                        <td class="p-4"><b class="text-indigo-400">${esc(w.method)}</b><br><span class="text-xs text-slate-400 font-mono">${esc(w.account)}</span></td>
                         <td class="p-4 font-bold text-emerald-400">Rs. ${w.amount}</td>
                         <td class="p-4 space-y-2 min-w-[220px]">
                             <input type="text" id="admin-wd-remark-${w.withdrawId}" placeholder="Remark / karan (reject garda must)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
                             <div class="flex space-x-2">
-                                <button onclick="approveWithdrawal(${w.withdrawId})" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Mark as Paid</button>
-                                <button onclick="rejectWithdrawal(${w.withdrawId})" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject &amp; Refund</button>
+                                <button onclick="approveWithdrawal(${Number(w.withdrawId)})" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Mark as Paid</button>
+                                <button onclick="rejectWithdrawal(${Number(w.withdrawId)})" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow">Reject &amp; Refund</button>
                             </div>
                         </td>
                     </tr>
@@ -3068,7 +3109,7 @@ function closeTaskAndRefund(taskId, by) {
                 const prog = t.postedBy
                     ? `Done ${i.approved}/${i.maxWorkers} • Pending ${i.pending} • Free ${i.free}<div class="h-1.5 bg-slate-700 rounded-full mt-1.5"><div class="h-1.5 bg-emerald-500 rounded-full" style="width:${pct}%"></div></div>`
                     : `Approved ${appr} • Pending ${pend}<br><span class="text-[10px] text-slate-500">Open for all users</span>`;
-                const closeBtn = t.postedBy ? `<button onclick="adminCloseTask(${t.id})" title="Close & refund" class="bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-lock"></i></button>` : '';
+                const closeBtn = t.postedBy ? `<button onclick="adminCloseTask(${Number(t.id)})" title="Close & refund" class="bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-lock"></i></button>` : '';
                 tbody.innerHTML += `
                     <tr class="border-b border-slate-700/50 hover:bg-slate-700/20 transition">
                         <td class="p-4 font-medium text-slate-200 max-w-[280px]">${esc(t.title)}<br><span class="text-[10px] text-indigo-300">${esc(t.category || '')}</span>${t.description ? `<p class="text-[11px] text-slate-400 font-normal mt-1 whitespace-pre-line">${linkify(t.description)}</p>` : ''}${t.link ? `<div class="mt-1.5">${linkBtnHtml(t.link)}</div>` : ''}${t.image ? `<div class="mt-2">${thumbHtml(t.image, 48)}</div>` : ''}</td>
@@ -3076,7 +3117,7 @@ function closeTaskAndRefund(taskId, by) {
                         <td class="p-4 text-xs">${reward}</td>
                         <td class="p-4 text-xs text-slate-300 min-w-[150px]">${prog}</td>
                         <td class="p-4 text-xs text-slate-400">${fmtDate(taskPostedTs(t))}</td>
-                        <td class="p-4 text-right whitespace-nowrap space-x-1.5">${closeBtn}<button onclick="adminEditTask(${t.id})" class="bg-slate-700 hover:bg-slate-600 text-indigo-300 px-3 py-1.5 rounded-xl text-xs font-bold transition border border-slate-600"><i class="fa-solid fa-pen"></i></button><button onclick="adminDeleteTask(${t.id})" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-trash"></i></button></td>
+                        <td class="p-4 text-right whitespace-nowrap space-x-1.5">${closeBtn}<button onclick="adminEditTask(${Number(t.id)})" class="bg-slate-700 hover:bg-slate-600 text-indigo-300 px-3 py-1.5 rounded-xl text-xs font-bold transition border border-slate-600"><i class="fa-solid fa-pen"></i></button><button onclick="adminDeleteTask(${t.id})" class="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition shadow"><i class="fa-solid fa-trash"></i></button></td>
                     </tr>`;
             });
         }
